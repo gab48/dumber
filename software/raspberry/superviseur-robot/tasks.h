@@ -66,6 +66,7 @@ private:
     ComRobot robot;
     int robotStarted = 0;
     int move = MESSAGE_ROBOT_STOP;
+    int watchdog = 0;
     
     /**********************************************************************/
     /* Tasks                                                              */
@@ -77,6 +78,7 @@ private:
     RT_TASK th_startRobot;
     RT_TASK th_move;
     RT_TASK th_battery;
+    RT_TASK th_watchdog;
     
     /**********************************************************************/
     /* Mutex                                                              */
@@ -85,6 +87,7 @@ private:
     RT_MUTEX mutex_robot;
     RT_MUTEX mutex_robotStarted;
     RT_MUTEX mutex_move;
+    RT_MUTEX mutex_watchdog;
 
     /**********************************************************************/
     /* Semaphores                                                         */
@@ -137,6 +140,11 @@ private:
      * @brief Thread handling battery level checker.
      */
     void BatteryTask(void *arg);
+    
+    /**
+     * @brief Thread handling watchdog
+     */
+    void WatchDogTask(void *arg);
     
     /**********************************************************************/
     /* Queue services                                                     */

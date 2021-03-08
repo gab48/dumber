@@ -74,6 +74,10 @@ void Tasks::Init() {
         cerr << "Error mutex create: " << strerror(-err) << endl << flush;
         exit(EXIT_FAILURE);
     }
+    if (err = rt_mutex_create(&mutex_watchdog, NULL)) {
+        cerr << "Error mutex create: " << strerror(-err) << endl << flush;
+        exit(EXIT_FAILURE);
+    }
     cout << "Mutexes created successfully" << endl << flush;
 
     /**************************************************************************************/
@@ -125,6 +129,10 @@ void Tasks::Init() {
         exit(EXIT_FAILURE);
     }
     if (err = rt_task_create(&th_battery, "th_battery", 0, PRIORITY_TBATTERY, 0)) {
+        cerr << "Error task create: " << strerror(-err) << endl << flush;
+        exit(EXIT_FAILURE);
+    }
+    if (err = rt_task_create(&th_watchdog, "th_watchdog", 0, PRIORITY_TBATTERY, 0)) {
         cerr << "Error task create: " << strerror(-err) << endl << flush;
         exit(EXIT_FAILURE);
     }
@@ -271,13 +279,23 @@ void Tasks::ReceiveFromMonTask(void *arg) {
         cout << "Rcv <= " << msgRcv->ToString() << endl << flush;
 
         if (msgRcv->CompareID(MESSAGE_MONITOR_LOST)) {
+            cout << "Monitor : Connection lost" << endl;
             delete(msgRcv);
             exit(-1);
         } else if (msgRcv->CompareID(MESSAGE_ROBOT_COM_OPEN)) {
             rt_sem_v(&sem_openComRobot);
         } else if (msgRcv->CompareID(MESSAGE_ROBOT_START_WITHOUT_WD)) {
             rt_sem_v(&sem_startRobot);
-        } else if (msgRcv->CompareID(MESSAGE_ROBOT_GO_FORWARD) ||
+        } 
+        
+        else if (msgRcv->CompareID(MESSAGE_ROBOT_START_WITH_WD)) {
+            rt_sem_v(&sem_startRobot);
+            rt_mutex_acquire(&mutex_watchdog, TM_INFINITE);
+            this->watchdog = 1;
+            rt_mutex_release(&mutex_watchdog);
+        } 
+        
+        else if (msgRcv->CompareID(MESSAGE_ROBOT_GO_FORWARD) ||
                 msgRcv->CompareID(MESSAGE_ROBOT_GO_BACKWARD) ||
                 msgRcv->CompareID(MESSAGE_ROBOT_GO_LEFT) ||
                 msgRcv->CompareID(MESSAGE_ROBOT_GO_RIGHT) ||
@@ -340,9 +358,21 @@ void Tasks::StartRobotTask(void *arg) {
         Message * msgSend;
         rt_sem_p(&sem_startRobot, TM_INFINITE);
         cout << "Start robot without watchdog (";
+        
+        rt_mutex_acquire(&mutex_watchdog, TM_INFINITE);
         rt_mutex_acquire(&mutex_robot, TM_INFINITE);
-        msgSend = robot.Write(robot.StartWithoutWD());
+        if (this->watchdog == 1) {
+            msgSend = robot.Write(robot.StartWithWD());
+            if (int err = rt_task_start(&th_watchdog, (void(*)(void*)) & Tasks::WatchDogTask, this)) {
+                cerr << "Error task start: " << strerror(-err) << endl << flush;
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            msgSend = robot.Write(robot.StartWithoutWD());
+        }
         rt_mutex_release(&mutex_robot);
+        rt_mutex_release(&mutex_watchdog);
+        
         cout << msgSend->GetID();
         cout << ")" << endl;
 
@@ -387,8 +417,11 @@ void Tasks::MoveTask(void *arg) {
             cout << " move: " << cpMove;
             
             rt_mutex_acquire(&mutex_robot, TM_INFINITE);
-            robot.Write(new Message((MessageID)cpMove));
+            Message * ret = robot.Write(new Message((MessageID)cpMove));
             rt_mutex_release(&mutex_robot);
+            if (ret->CompareID(MESSAGE_ANSWER_COM_ERROR)) {
+                WriteInQueue(&q_messageToMon, ret);
+            }
         }
         cout << endl << flush;
     }
@@ -405,31 +438,45 @@ void Tasks::BatteryTask(void *arg) {
     rt_task_set_periodic(NULL, TM_NOW, 500000000);
     
     while(1) {
-        Message * msgSend;
         rt_task_wait_period(NULL);
-        cout << "Check battery level : " ;
         
         rt_mutex_acquire(&mutex_robotStarted, TM_INFINITE);
         rs = robotStarted;
         rt_mutex_release(&mutex_robotStarted);
         if (rs == 1) {
-
             rt_mutex_acquire(&mutex_robot, TM_INFINITE);
-            msgSend = robot.Write(robot.GetBattery());
+            Message * batteryLevel = robot.Write(robot.GetBattery());
             rt_mutex_release(&mutex_robot);
             
-            //WriteInQueue(&q_messageToMon, msgSend);
-            
-            cout << msgSend->GetID();
-            if (msgSend->GetID() == MESSAGE_ROBOT_BATTERY_LEVEL) {
-                cout << (MessageBattery) msgSend.ToString();
+            if (batteryLevel->CompareID(MESSAGE_ROBOT_BATTERY_LEVEL)) {
+                WriteInQueue(&q_messageToMon, batteryLevel);
             }
         }
-        cout << endl << flush;
-        
     }
+}
+
+void Tasks::WatchDogTask(void *arg) {
+    int rs;
     
+    cout << "Start " << __PRETTY_FUNCTION__ << endl << flush;
     
+    rt_task_set_periodic(NULL, TM_NOW, 1000000000);
+    
+    while(1) {
+        rt_task_wait_period(NULL);
+        
+        rt_mutex_acquire(&mutex_robotStarted, TM_INFINITE);
+        rs = robotStarted;
+        rt_mutex_release(&mutex_robotStarted);
+        if (rs == 1) {
+            rt_mutex_acquire(&mutex_robot, TM_INFINITE);
+            Message * reloadWD = robot.Write(robot.ReloadWD());
+            rt_mutex_release(&mutex_robot);
+            if (reloadWD->CompareID(MESSAGE_ANSWER_COM_ERROR)) {
+                WriteInQueue(&q_messageToMon, reloadWD);
+            }
+        }
+    }
 }
 
 /**
@@ -442,6 +489,11 @@ void Tasks::WriteInQueue(RT_QUEUE *queue, Message *msg) {
     if ((err = rt_queue_write(queue, (const void *) &msg, sizeof ((const void *) &msg), Q_NORMAL)) < 0) {
         cerr << "Write in queue failed: " << strerror(-err) << endl << flush;
         throw std::runtime_error{"Error in write in queue"};
+    }
+    if (msg->CompareID(MESSAGE_ANSWER_COM_ERROR)) {
+        rt_mutex_acquire(&mutex_robotStarted, TM_INFINITE);
+        robotStarted = 0;
+        rt_mutex_release(&mutex_robotStarted);
     }
 }
 

@@ -95,7 +95,9 @@ int ComRobot::Open(string usart) {
  * @return Success if above 0, failure if below 0
  */
 int ComRobot::Close() {
-    return close(fd);
+    int ret = close(fd);
+    fd = -1;
+    return ret;
 }
 
 /**
@@ -123,6 +125,7 @@ Message *ComRobot::Write(Message* msg) {
         if (count < 0) {
             cerr << "[" << __PRETTY_FUNCTION__ << "] UART TX error (" << to_string(count) << ")" << endl << flush;
             msgAnswer = new Message(MESSAGE_ANSWER_COM_ERROR);
+            this->errorCounter++;
         } else { /* write successfull, read answer from robot */
 
             try {
@@ -132,9 +135,11 @@ Message *ComRobot::Write(Message* msg) {
                 if (VerifyChecksum(s)) {
                     msgAnswer = StringToMessage(s);
                 } else msgAnswer = new Message(MESSAGE_ANSWER_ROBOT_UNKNOWN_COMMAND);
+                this->errorCounter = 0;
 
             } catch (std::runtime_error &e) {
                 s = string(e.what());
+                this->errorCounter++;
 
                 if (s.find("imeout")) { // timeout detecté
                     msgAnswer = new Message(MESSAGE_ANSWER_ROBOT_TIMEOUT);
@@ -146,6 +151,12 @@ Message *ComRobot::Write(Message* msg) {
     } else {
         cerr << __PRETTY_FUNCTION__ << ": Com port not open" << endl << flush;
         throw std::runtime_error{"Com port not open"};
+    }
+    
+    if (this->errorCounter >= 3) {
+        msgAnswer = new Message(MESSAGE_ANSWER_COM_ERROR);
+        cout << "==== /!\\ Deconnection occurred /!\\ ====" << endl;
+        this->Close();
     }
 
     // deallocation of msg

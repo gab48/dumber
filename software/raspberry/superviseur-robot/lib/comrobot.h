@@ -157,6 +157,11 @@ protected:
      * Serial link file descriptor
      */
     int fd;
+    
+    /**
+     * Counter for error (+1 on any error, =0 if success ; if > 3 connectionLost) 
+     */
+    int errorCounter;
 
     /**
      * Get an answer from robot
